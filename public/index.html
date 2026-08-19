@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Honeywell Camera</title>
+
+    <style>
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: white;
+        }
+
+        header {
+            padding: 20px;
+            background: #222;
+        }
+
+        h1 {
+            margin: 0;
+        }
+
+        .container {
+            padding: 20px;
+        }
+
+        video {
+            width: 100%;
+            max-width: 1200px;
+            background: black;
+        }
+
+        #status {
+            margin-top: 15px;
+            padding: 10px;
+            background: #222;
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+    <header>
+        <h1>Honeywell Camera - Live Stream</h1>
+    </header>
+
+    <div class="container">
+
+        <video
+            id="video"
+            controls
+            autoplay
+            muted
+            playsinline
+        ></video>
+
+        <div id="status">
+            Connecting to camera...
+        </div>
+
+    </div>
+
+
+    <!-- HLS.js -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+    <script>
+
+        const video = document.getElementById("video");
+
+        const status = document.getElementById("status");
+
+        const streamUrl =
+            "/streams/camera1/index.m3u8";
+
+
+        if (Hls.isSupported()) {
+
+            const hls = new Hls();
+
+            hls.loadSource(streamUrl);
+
+            hls.attachMedia(video);
+
+
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+
+                console.log("HLS manifest loaded");
+
+                status.textContent =
+                    "Camera stream connected";
+
+                video.play();
+
+            });
+
+
+            hls.on(Hls.Events.ERROR, (event, data) => {
+
+                console.error(
+                    "HLS error:",
+                    data
+                );
+
+                status.textContent =
+                    "Stream error: " + data.details;
+
+            });
+
+        }
+
+        else if (
+            video.canPlayType(
+                "application/vnd.apple.mpegurl"
+            )
+        ) {
+
+            // Safari / native HLS
+
+            video.src = streamUrl;
+
+            video.addEventListener(
+                "loadedmetadata",
+                () => {
+
+                    status.textContent =
+                        "Camera stream connected";
+
+                    video.play();
+
+                }
+            );
+
+        }
+
+        else {
+
+            status.textContent =
+                "HLS is not supported by this browser";
+
+        }
+
+    </script>
+
+</body>
+
+</html>
