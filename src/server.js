@@ -14,7 +14,10 @@ const {
     startDownload,
     getDownload,
     recordingsDir,
-    redactUri
+    redactUri,
+    resolvePlayback,
+    spawnPlaybackStream,
+    stopPlaybackStream
 } = require("./camera/recordings");
 
 const app = express();
@@ -305,6 +308,71 @@ app.post("/api/recordings/download", async (req, res) => {
 
 });
 
+// MPEG-TS playback from SD card — piped through FFmpeg, not saved to disk
+app.get("/api/recordings/stream", async (req, res) => {
+
+    let ffmpeg;
+
+    try {
+
+        const playback = await resolvePlayback({
+            recordingToken: req.query.recordingToken,
+            start: req.query.start,
+            end: req.query.end
+        });
+
+        res.status(200);
+        res.setHeader("Content-Type", "video/mp2t");
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Connection", "close");
+
+        ffmpeg = spawnPlaybackStream(
+            playback.uris[0],
+            playback.durationSeconds
+        );
+
+        ffmpeg.stdout.pipe(res);
+
+        ffmpeg.stderr.on("data", (data) => {
+            console.log(`[Playback FFmpeg] ${data}`);
+        });
+
+        const stop = () => {
+            stopPlaybackStream();
+        };
+
+        req.on("close", stop);
+        res.on("close", stop);
+
+        ffmpeg.on("error", (error) => {
+            console.error("Playback FFmpeg failed:", error.message);
+            if (!res.writableEnded) {
+                res.end();
+            }
+        });
+
+        ffmpeg.on("close", () => {
+            if (!res.writableEnded) {
+                res.end();
+            }
+        });
+
+    }
+    catch (error) {
+
+        if (res.headersSent) {
+            res.end();
+            return;
+        }
+
+        res.status(400).json({
+            error: error.message
+        });
+
+    }
+
+});
+
 // --------------------------------------------------
 // Start server
 // --------------------------------------------------
@@ -331,6 +399,8 @@ app.listen(PORT, async () => {
 process.on("SIGINT", () => {
 
     console.log("\nShutting down...");
+
+    stopPlaybackStream();
 
     process.exit(0);
 

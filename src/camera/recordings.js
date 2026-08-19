@@ -562,7 +562,7 @@ function listDownloads() {
 }
 
 
-async function startDownload({ recordingToken, start, end }) {
+function parsePlaybackRange(start, end) {
 
     if (!start || !end) {
         throw new Error("start and end times are required");
@@ -584,8 +584,6 @@ async function startDownload({ recordingToken, start, end }) {
         Math.ceil((endDate.getTime() - startDate.getTime()) / 1000)
     );
 
-    // Playback is realtime, so a 24h range takes about 24h to download
-    // and becomes one huge file. Keep a single request to 2 hours.
     const maxSeconds = 2 * 60 * 60;
 
     if (durationSeconds > maxSeconds) {
@@ -594,12 +592,20 @@ async function startDownload({ recordingToken, start, end }) {
 
         throw new Error(
             `This range is ${hours} hours. The camera plays recordings ` +
-            `at normal speed, so that would take about ${hours} hours to ` +
-            `download into one file. Pick a window of 2 hours or less. ` +
-            `For a full day, download several shorter ranges instead.`
+            `at normal speed, so keep a window of 2 hours or less.`
         );
 
     }
+
+    return { startDate, endDate, durationSeconds };
+
+}
+
+
+async function resolvePlayback({ recordingToken, start, end }) {
+
+    const { startDate, endDate, durationSeconds } =
+        parsePlaybackRange(start, end);
 
     let token = recordingToken || null;
     let replayUri = null;
@@ -631,6 +637,93 @@ async function startDownload({ recordingToken, start, end }) {
     }
 
     const uris = buildPlaybackUris(startDate, endDate, replayUri);
+
+    return {
+        token,
+        replayUri,
+        uris,
+        startDate,
+        endDate,
+        durationSeconds
+    };
+
+}
+
+
+let activePlayback = null;
+
+
+function stopPlaybackStream() {
+
+    if (!activePlayback) {
+        return;
+    }
+
+    try {
+        activePlayback.kill();
+    }
+    catch (_error) {
+        // ignore
+    }
+
+    activePlayback = null;
+
+}
+
+
+function spawnPlaybackStream(inputUri, durationSeconds) {
+
+    stopPlaybackStream();
+
+    const ffmpeg = spawn("ffmpeg", [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-analyzeduration",
+        "20000000",
+        "-probesize",
+        "20000000",
+        "-fflags",
+        "+genpts",
+        "-i",
+        inputUri,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-an",
+        "-t",
+        String(durationSeconds),
+        "-f",
+        "mpegts",
+        "pipe:1"
+    ]);
+
+    activePlayback = ffmpeg;
+
+    ffmpeg.on("close", () => {
+        if (activePlayback === ffmpeg) {
+            activePlayback = null;
+        }
+    });
+
+    return ffmpeg;
+
+}
+
+
+async function startDownload({ recordingToken, start, end }) {
+
+    const {
+        token,
+        replayUri,
+        uris,
+        startDate,
+        endDate,
+        durationSeconds
+    } = await resolvePlayback({ recordingToken, start, end });
 
     const fileName =
         `recording_${formatFileStamp(startDate)}_` +
@@ -698,5 +791,8 @@ module.exports = {
     getDownload,
     listDownloads,
     recordingsDir,
-    redactUri
+    redactUri,
+    resolvePlayback,
+    spawnPlaybackStream,
+    stopPlaybackStream
 };

@@ -41,9 +41,9 @@
         }
 
         /* Live stream: hide seek/duration bar (meaningless for live) */
-        video::-webkit-media-controls-timeline,
-        video::-webkit-media-controls-current-time-display,
-        video::-webkit-media-controls-time-remaining-display {
+        #video::-webkit-media-controls-timeline,
+        #video::-webkit-media-controls-current-time-display,
+        #video::-webkit-media-controls-time-remaining-display {
             display: none !important;
         }
 
@@ -158,10 +158,11 @@
             <h2>SD card recordings</h2>
 
             <p class="muted">
-                Uses ONVIF GetRecordingJobs and GetReplayUri, then saves
-                the clip to this laptop with FFmpeg. Use a window of
-                2 hours or less — the camera plays back at normal speed,
-                so a 24-hour range would take about 24 hours to download.
+                Uses ONVIF GetRecordingJobs and GetReplayUri.
+                <strong>Play from SD</strong> streams a custom time range
+                through this server without saving a file.
+                <strong>Download to laptop</strong> still writes an MP4.
+                Keep the window to 2 hours or less.
             </p>
 
             <div class="toolbar">
@@ -184,11 +185,19 @@
                 </label>
 
                 <button id="rec-refresh" type="button">Refresh list</button>
+                <button id="rec-play" type="button">Play from SD</button>
                 <button id="rec-download" type="button">Download to laptop</button>
 
             </div>
 
             <div id="rec-status" class="muted">Loading recordings...</div>
+
+            <video
+                id="playback"
+                controls
+                muted
+                playsinline
+            ></video>
 
             <h3>Recording jobs</h3>
             <table>
@@ -252,6 +261,7 @@
 
     <!-- HLS.js -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
 
     <script>
 
@@ -575,12 +585,96 @@
 
         }
 
+        const playbackVideo = document.getElementById("playback");
+        let playbackPlayer = null;
+
+        function stopSdPlayback() {
+
+            if (playbackPlayer) {
+                try {
+                    playbackPlayer.pause();
+                    playbackPlayer.unload();
+                    playbackPlayer.detachMediaElement();
+                    playbackPlayer.destroy();
+                }
+                catch (_error) {
+                    // ignore
+                }
+                playbackPlayer = null;
+            }
+
+            playbackVideo.removeAttribute("src");
+            playbackVideo.load();
+
+        }
+
+        function playFromSd(start, end, token) {
+
+            if (typeof mpegts === "undefined" || !mpegts.isSupported()) {
+                recStatus.innerHTML =
+                    `<span class="error">This browser cannot play MPEG-TS playback</span>`;
+                return;
+            }
+
+            stopSdPlayback();
+
+            const params = new URLSearchParams({
+                start,
+                end
+            });
+
+            if (token) {
+                params.set("recordingToken", token);
+            }
+
+            const url = `/api/recordings/stream?${params.toString()}`;
+
+            playbackPlayer = mpegts.createPlayer({
+                type: "mpegts",
+                isLive: true,
+                url
+            });
+
+            playbackPlayer.on(
+                mpegts.Events.ERROR,
+                (errorType, errorDetail, errorInfo) => {
+                    recStatus.innerHTML =
+                        `<span class="error">Playback error: ${errorDetail || errorType}</span>`;
+                }
+            );
+
+            playbackPlayer.attachMediaElement(playbackVideo);
+            playbackPlayer.load();
+            playbackPlayer.play();
+
+            recStatus.innerHTML =
+                `<span class="ok">Playing SD range without saving a file</span>`;
+
+        }
+
         document.getElementById("rec-refresh").addEventListener(
             "click",
             () => loadRecordings().catch((error) => {
                 recStatus.innerHTML =
                     `<span class="error">${error.message}</span>`;
             })
+        );
+
+        document.getElementById("rec-play").addEventListener(
+            "click",
+            () => {
+                try {
+                    playFromSd(
+                        recStart.value,
+                        recEnd.value,
+                        recToken.value
+                    );
+                }
+                catch (error) {
+                    recStatus.innerHTML =
+                        `<span class="error">${error.message}</span>`;
+                }
+            }
         );
 
         document.getElementById("rec-download").addEventListener(
@@ -606,7 +700,7 @@
             recStart.value = toLocalInputValue(new Date(button.dataset.start));
             recEnd.value = toLocalInputValue(new Date(button.dataset.end));
             recStatus.textContent =
-                "Range filled. Narrow the times if needed, then click Download to laptop.";
+                "Range filled. Narrow the times if needed, then click Play from SD.";
 
         });
 
