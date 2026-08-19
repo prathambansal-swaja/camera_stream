@@ -40,10 +40,93 @@
             background: black;
         }
 
+        /* Live stream: hide seek/duration bar (meaningless for live) */
+        video::-webkit-media-controls-timeline,
+        video::-webkit-media-controls-current-time-display,
+        video::-webkit-media-controls-time-remaining-display {
+            display: none !important;
+        }
+
         #status {
             margin-top: 15px;
             padding: 10px;
             background: #222;
+        }
+
+        .recordings {
+            margin-top: 30px;
+            max-width: 1200px;
+        }
+
+        .recordings h2 {
+            margin-top: 0;
+        }
+
+        .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: end;
+            margin: 16px 0;
+        }
+
+        label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        input, button, select {
+            background: #222;
+            color: white;
+            border: 1px solid #444;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+
+        button {
+            cursor: pointer;
+            background: #3a6ea5;
+            border-color: #3a6ea5;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0 24px;
+            font-size: 14px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid #333;
+            vertical-align: top;
+            word-break: break-all;
+        }
+
+        th {
+            color: #aaa;
+            font-weight: normal;
+        }
+
+        .muted {
+            color: #888;
+        }
+
+        .error {
+            color: #f88;
+        }
+
+        .ok {
+            color: #8f8;
         }
 
     </style>
@@ -70,6 +153,100 @@
             Connecting to camera...
         </div>
 
+        <section class="recordings">
+
+            <h2>SD card recordings</h2>
+
+            <p class="muted">
+                Uses ONVIF GetRecordingJobs and GetReplayUri, then saves
+                the clip to this laptop with FFmpeg. Use a window of
+                2 hours or less — the camera plays back at normal speed,
+                so a 24-hour range would take about 24 hours to download.
+            </p>
+
+            <div class="toolbar">
+
+                <label>
+                    Start
+                    <input id="rec-start" type="datetime-local">
+                </label>
+
+                <label>
+                    End
+                    <input id="rec-end" type="datetime-local">
+                </label>
+
+                <label>
+                    Recording token
+                    <select id="rec-token">
+                        <option value="">Auto</option>
+                    </select>
+                </label>
+
+                <button id="rec-refresh" type="button">Refresh list</button>
+                <button id="rec-download" type="button">Download to laptop</button>
+
+            </div>
+
+            <div id="rec-status" class="muted">Loading recordings...</div>
+
+            <h3>Recording jobs</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th>Recording token</th>
+                        <th>Mode</th>
+                    </tr>
+                </thead>
+                <tbody id="rec-jobs">
+                    <tr><td colspan="3" class="muted">None yet</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Replay URIs</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Token</th>
+                        <th>RTSP URI</th>
+                    </tr>
+                </thead>
+                <tbody id="rec-replay">
+                    <tr><td colspan="2" class="muted">None yet</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Available on SD card</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Start</th>
+                        <th>End</th>
+                        <th>Path</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="rec-files">
+                    <tr><td colspan="4" class="muted">None yet</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Saved on this laptop</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Size</th>
+                    </tr>
+                </thead>
+                <tbody id="rec-local">
+                    <tr><td colspan="2" class="muted">None yet</td></tr>
+                </tbody>
+            </table>
+
+        </section>
+
     </div>
 
 
@@ -88,7 +265,14 @@
 
         if (Hls.isSupported()) {
 
-            const hls = new Hls();
+            const hls = new Hls({
+                liveSyncDurationCount: 1,
+                liveMaxLatencyDurationCount: 3,
+                liveDurationInfinity: true,
+                maxBufferLength: 2,
+                maxMaxBufferLength: 4,
+                lowLatencyMode: true
+            });
 
             hls.loadSource(streamUrl);
 
@@ -151,6 +335,285 @@
                 "HLS is not supported by this browser";
 
         }
+
+
+        function toLocalInputValue(date) {
+
+            const pad = (value) => String(value).padStart(2, "0");
+
+            return (
+                `${date.getFullYear()}-` +
+                `${pad(date.getMonth() + 1)}-` +
+                `${pad(date.getDate())}T` +
+                `${pad(date.getHours())}:` +
+                `${pad(date.getMinutes())}`
+            );
+
+        }
+
+        function formatBytes(bytes) {
+
+            if (!bytes) {
+                return "0 B";
+            }
+
+            const units = ["B", "KB", "MB", "GB"];
+            let size = bytes;
+            let unit = 0;
+
+            while (size >= 1024 && unit < units.length - 1) {
+                size /= 1024;
+                unit += 1;
+            }
+
+            return `${size.toFixed(1)} ${units[unit]}`;
+
+        }
+
+        function setTable(tbody, rows, emptyCols) {
+
+            if (!rows.length) {
+                tbody.innerHTML =
+                    `<tr><td colspan="${emptyCols}" class="muted">None</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = rows.join("");
+
+        }
+
+        const recStatus = document.getElementById("rec-status");
+        const recStart = document.getElementById("rec-start");
+        const recEnd = document.getElementById("rec-end");
+        const recToken = document.getElementById("rec-token");
+        const recJobs = document.getElementById("rec-jobs");
+        const recReplay = document.getElementById("rec-replay");
+        const recFiles = document.getElementById("rec-files");
+        const recLocal = document.getElementById("rec-local");
+
+        const now = new Date();
+        const hourAgo = new Date(now.getTime() - (60 * 60 * 1000));
+
+        recStart.value = toLocalInputValue(hourAgo);
+        recEnd.value = toLocalInputValue(now);
+
+        async function loadRecordings(attempt = 0) {
+
+            recStatus.textContent = "Loading recordings from camera...";
+
+            const response = await fetch("/api/recordings");
+            const data = await response.json();
+
+            if (!response.ok) {
+
+                if (
+                    attempt < 8 &&
+                    /not connected/i.test(data.error || "")
+                ) {
+                    recStatus.textContent = "Waiting for ONVIF...";
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                    return loadRecordings(attempt + 1);
+                }
+
+                recStatus.innerHTML =
+                    `<span class="error">${data.error || "Failed to load recordings"}</span>`;
+                return data;
+            }
+
+            const tokens = [
+                ...new Set([
+                    ...(data.jobs || []).map((job) => job.recordingToken),
+                    ...(data.recordings || []).map((item) => item.recordingToken),
+                    ...(data.replay || []).map((item) => item.recordingToken)
+                ].filter(Boolean))
+            ];
+
+            recToken.innerHTML =
+                `<option value="">Auto</option>` +
+                tokens.map((token) =>
+                    `<option value="${token}">${token}</option>`
+                ).join("");
+
+            setTable(
+                recJobs,
+                (data.jobs || []).map((job) => `
+                    <tr>
+                        <td>${job.jobToken || "-"}</td>
+                        <td>${job.recordingToken || "-"}</td>
+                        <td>${job.mode || "-"}</td>
+                    </tr>
+                `),
+                3
+            );
+
+            setTable(
+                recReplay,
+                (data.replay || []).map((item) => `
+                    <tr>
+                        <td>${item.recordingToken || "-"}</td>
+                        <td>
+                            ${item.uri || "-"}
+                            ${item.availableFrom ? `<div class="muted">Available ${item.availableFrom} → ${item.availableUntil}</div>` : ""}
+                        </td>
+                    </tr>
+                `),
+                2
+            );
+
+            setTable(
+                recFiles,
+                (data.sdCardFiles || []).map((file) => `
+                    <tr>
+                        <td>${file.startTime || "-"}</td>
+                        <td>${file.endTime || "-"}</td>
+                        <td>${file.filePath || "-"}</td>
+                        <td>
+                            <button
+                                type="button"
+                                data-start="${file.startIso || file.startTime || ""}"
+                                data-end="${file.endIso || file.endTime || ""}"
+                            >Use range</button>
+                        </td>
+                    </tr>
+                `),
+                4
+            );
+
+            setTable(
+                recLocal,
+                (data.local || []).map((file) => `
+                    <tr>
+                        <td><a href="${file.url}" style="color:#8cf">${file.name}</a></td>
+                        <td>${formatBytes(file.size)}</td>
+                    </tr>
+                `),
+                2
+            );
+
+            const errors = (data.errors || [])
+                .map((item) => `${item.step}: ${item.error}`)
+                .join(" | ");
+
+            if ((data.replay || []).length) {
+
+                const window = data.replay[0];
+                recStatus.innerHTML =
+                    `<span class="ok">Camera recordings ready.</span> ` +
+                    `<span class="muted">Footage is on the SD card` +
+                    `${window.availableFrom ? ` from ${window.availableFrom} to ${window.availableUntil}` : ""}. ` +
+                    `Pick a start/end time and click Download to laptop.</span>`;
+
+            }
+            else if (!tokens.length && !(data.sdCardFiles || []).length) {
+                recStatus.innerHTML =
+                    `<span class="error">No recordings found. Enable SD card recording on the camera and make sure ONVIF replay is turned on.${errors ? " " + errors : ""}</span>`;
+            }
+            else if (errors) {
+                recStatus.innerHTML =
+                    `<span class="muted">Loaded with some camera API errors: ${errors}</span>`;
+            }
+            else {
+                recStatus.innerHTML =
+                    `<span class="ok">Camera recordings loaded</span>`;
+            }
+
+            return data;
+
+        }
+
+        async function downloadClip(start, end, token) {
+
+            recStatus.textContent = "Starting download...";
+
+            const response = await fetch("/api/recordings/download", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    start,
+                    end,
+                    recordingToken: token || undefined
+                })
+            });
+
+            const job = await response.json();
+
+            if (!response.ok) {
+                recStatus.innerHTML =
+                    `<span class="error">${job.error || "Download failed"}</span>`;
+                return;
+            }
+
+            recStatus.textContent =
+                `Downloading ${job.file} via ${job.source}...`;
+
+            const timer = setInterval(async () => {
+
+                const statusRes = await fetch(
+                    `/api/recordings/downloads/${job.id}`
+                );
+                const current = await statusRes.json();
+
+                if (current.status === "running") {
+                    recStatus.textContent =
+                        `Downloading ${current.file}...`;
+                    return;
+                }
+
+                clearInterval(timer);
+
+                if (current.status === "done") {
+                    recStatus.innerHTML =
+                        `<span class="ok">Saved ${current.file}</span>`;
+                    loadRecordings();
+                    return;
+                }
+
+                recStatus.innerHTML =
+                    `<span class="error">${current.error || "Download failed"}</span>`;
+
+            }, 2000);
+
+        }
+
+        document.getElementById("rec-refresh").addEventListener(
+            "click",
+            () => loadRecordings().catch((error) => {
+                recStatus.innerHTML =
+                    `<span class="error">${error.message}</span>`;
+            })
+        );
+
+        document.getElementById("rec-download").addEventListener(
+            "click",
+            () => downloadClip(
+                recStart.value,
+                recEnd.value,
+                recToken.value
+            ).catch((error) => {
+                recStatus.innerHTML =
+                    `<span class="error">${error.message}</span>`;
+            })
+        );
+
+        recFiles.addEventListener("click", (event) => {
+
+            const button = event.target.closest("button[data-start]");
+
+            if (!button) {
+                return;
+            }
+
+            recStart.value = toLocalInputValue(new Date(button.dataset.start));
+            recEnd.value = toLocalInputValue(new Date(button.dataset.end));
+            recStatus.textContent =
+                "Range filled. Narrow the times if needed, then click Download to laptop.";
+
+        });
+
+        loadRecordings().catch((error) => {
+            recStatus.innerHTML =
+                `<span class="error">${error.message}</span>`;
+        });
 
     </script>
 

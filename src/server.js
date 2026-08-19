@@ -8,7 +8,18 @@ const {
     startONVIF
 } = require("./camera/onvifClient");
 
+const {
+    listRecordings,
+    listLocalRecordings,
+    startDownload,
+    getDownload,
+    recordingsDir,
+    redactUri
+} = require("./camera/recordings");
+
 const app = express();
+
+app.use(express.json());
 
 const PORT = process.env.SERVER_PORT || 3000;
 
@@ -72,6 +83,16 @@ function startFFmpeg() {
         "-rtsp_transport",
         "tcp",
 
+        // Minimize input buffering
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "500000",
+
         // Input
         "-i",
         rtspUrl,
@@ -82,9 +103,21 @@ function startFFmpeg() {
 
         // Reduce latency
         "-preset",
-        "veryfast",
+        "ultrafast",
         "-tune",
         "zerolatency",
+        "-bf",
+        "0",
+
+        // Force 1s keyframes so HLS can actually split every second.
+        // Default x264 GOP is ~250 frames (~10s), which is why the
+        // live view was 15–20s behind.
+        "-g",
+        "25",
+        "-keyint_min",
+        "25",
+        "-sc_threshold",
+        "0",
 
         // Pixel format supported by browsers
         "-pix_fmt",
@@ -105,9 +138,9 @@ function startFFmpeg() {
         "-hls_list_size",
         "3",
 
-        // Remove old segments
+        // Live playlist: drop old segments, never mark as VOD
         "-hls_flags",
-        "delete_segments+append_list",
+        "delete_segments+omit_endlist+independent_segments",
 
         // HLS output
         hlsOutput
@@ -163,8 +196,21 @@ app.use(
 app.use(
     "/streams",
     express.static(
-        path.join(__dirname, "..", "streams")
+        path.join(__dirname, "..", "streams"),
+        {
+            setHeaders: (res) => {
+                res.setHeader(
+                    "Cache-Control",
+                    "no-cache, no-store, must-revalidate"
+                );
+            }
+        }
     )
+);
+
+app.use(
+    "/recordings",
+    express.static(recordingsDir)
 );
 
 // --------------------------------------------------
@@ -180,6 +226,82 @@ app.get("/api/status", (req, res) => {
         subtype: CAMERA_SUBTYPE,
         hls: "/streams/camera1/index.m3u8"
     });
+
+});
+
+// --------------------------------------------------
+// SD card recordings (ONVIF Profile G)
+// --------------------------------------------------
+
+app.get("/api/recordings", async (req, res) => {
+
+    try {
+
+        const data = await listRecordings();
+
+        res.json({
+            ...data,
+            replay: (data.replay || []).map((item) => ({
+                ...item,
+                uri: redactUri(item.uri)
+            })),
+            local: listLocalRecordings()
+        });
+
+    }
+    catch (error) {
+
+        const notReady = /not connected/i.test(error.message || "");
+
+        res.status(notReady ? 503 : 500).json({
+            error: error.message
+        });
+
+    }
+
+});
+
+app.get("/api/recordings/local", (req, res) => {
+
+    res.json({
+        local: listLocalRecordings()
+    });
+
+});
+
+app.get("/api/recordings/downloads/:id", (req, res) => {
+
+    const job = getDownload(req.params.id);
+
+    if (!job) {
+        res.status(404).json({ error: "Download not found" });
+        return;
+    }
+
+    res.json(job);
+
+});
+
+app.post("/api/recordings/download", async (req, res) => {
+
+    try {
+
+        const job = await startDownload({
+            recordingToken: req.body?.recordingToken,
+            start: req.body?.start,
+            end: req.body?.end
+        });
+
+        res.json(job);
+
+    }
+    catch (error) {
+
+        res.status(400).json({
+            error: error.message
+        });
+
+    }
 
 });
 

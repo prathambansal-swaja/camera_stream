@@ -34,11 +34,14 @@ eventBus.on(
 // Camera
 // --------------------------------------------------
 
+let onvifReady = false;
+
 const camera = new onvif.Cam({
     hostname: process.env.CAMERA_IP,
     username: process.env.CAMERA_USERNAME,
     password: process.env.CAMERA_PASSWORD,
-    port: process.env.ONVIF_PORT || 80
+    port: process.env.ONVIF_PORT || 80,
+    preserveAddress: true
 });
 
 
@@ -55,6 +58,8 @@ async function startONVIF() {
         );
 
         await camera.connect();
+
+        onvifReady = true;
 
         console.log(
             "ONVIF connected"
@@ -136,6 +141,23 @@ async function startONVIF() {
 // Export
 // --------------------------------------------------
 
+function getCamera() {
+
+    if (!onvifReady) {
+        throw new Error("ONVIF is not connected yet");
+    }
+
+    return camera;
+
+}
+
+function isOnvifReady() {
+    return onvifReady;
+}
+
+
 module.exports = {
-    startONVIF
+    startONVIF,
+    getCamera,
+    isOnvifReady
 };
