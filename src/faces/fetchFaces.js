@@ -12,7 +12,9 @@ const BASE_URL = `https://${CAMERA_IP}`;
 
 const PAGE_SIZE = 21;
 const MAX_UUIDS = 21;
+const STATS_PAGES = 3;
 const OUTPUT_DIR = path.join(__dirname, "face_images");
+const UUID_INDEX = path.join(OUTPUT_DIR, ".saved-uuids.json");
 
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false
@@ -177,14 +179,29 @@ async function getGroups() {
 }
 
 function loadSavedUuids() {
-    if (!fs.existsSync(OUTPUT_DIR)) {
-        return new Set();
-    }
-
     const ids = new Set();
 
+    if (fs.existsSync(UUID_INDEX)) {
+        try {
+            const listed = JSON.parse(fs.readFileSync(UUID_INDEX, "utf8"));
+
+            for (const id of listed) {
+                if (id) {
+                    ids.add(String(id));
+                }
+            }
+        }
+        catch (error) {
+            console.log("Could not read UUID index:", error.message);
+        }
+    }
+
+    if (!fs.existsSync(OUTPUT_DIR)) {
+        return ids;
+    }
+
     for (const file of fs.readdirSync(OUTPUT_DIR)) {
-        const match = String(file).match(/_(.+)\.jpg$/i);
+        const match = String(file).match(/_([^_]+)\.jpg$/i);
 
         if (match) {
             ids.add(match[1]);
@@ -192,6 +209,23 @@ function loadSavedUuids() {
     }
 
     return ids;
+}
+
+function rememberUuid(uuid) {
+    if (!uuid) {
+        return;
+    }
+
+    const ids = loadSavedUuids();
+    ids.add(String(uuid));
+    fs.writeFileSync(UUID_INDEX, JSON.stringify([...ids], null, 2));
+}
+
+function safeFilenamePart(value) {
+    return String(value || "Unknown")
+        .replace(/[<>:"/\\|?*]/g, "_")
+        .replace(/\s+/g, " ")
+        .trim() || "Unknown";
 }
 
 async function getUuids() {
@@ -311,7 +345,100 @@ async function getFacesById(uuids) {
     return faces;
 }
 
-function saveFaceImage(face) {
+async function getLatestStatistics() {
+    console.log("Fetching latest Face Statistics...");
+
+    const window = searchWindow();
+
+    const search = await apiRequest({
+        method: "POST",
+        url: `${BASE_URL}/API/AI/FaceStatistics/Search?${cameraTimestamp()}`,
+        data: {
+            version: "1.0",
+            data: {
+                MsgId: "",
+                StartTime: window.StartTime,
+                EndTime: window.EndTime
+            }
+        }
+    });
+
+    const searchCount = Number(search.data?.Count || 0);
+    const fetchCount = PAGE_SIZE * STATS_PAGES;
+    const startIndex = Math.max(0, searchCount - fetchCount);
+
+    console.log("FaceStatistics Search Count:", searchCount);
+    console.log("FaceStatistics StartIndex (latest pages):", startIndex);
+
+    const stats = [];
+
+    for (let index = startIndex; index < searchCount; index += PAGE_SIZE) {
+        const count = Math.min(PAGE_SIZE, searchCount - index);
+        const response = await apiRequest({
+            method: "POST",
+            url: `${BASE_URL}/API/AI/FaceStatistics/Get?${cameraTimestamp()}`,
+            data: {
+                version: "1.0",
+                data: {
+                    MsgId: "",
+                    StartIndex: index,
+                    Count: count,
+                    StartTime: window.StartTime,
+                    EndTime: window.EndTime
+                }
+            }
+        });
+
+        const page = response.data?.Statistics || [];
+        stats.push(...page);
+
+        console.log(
+            `FaceStatistics Get StartIndex=${index} Count=${count} ` +
+            `returned ${page.length}`
+        );
+    }
+
+    if (stats[0]) {
+        const sample = { ...stats[0] };
+
+        for (const key of Object.keys(sample)) {
+            if (typeof sample[key] === "string" && sample[key].length > 80) {
+                sample[key] = `[${sample[key].length} chars]`;
+            }
+        }
+
+        console.log("First statistic:", sample);
+    }
+
+    return stats;
+}
+
+function matchStatistic(face, statistics, usedIndexes) {
+    const start = Number(face.StartTime);
+    const end = Number(face.EndTime);
+
+    for (let i = 0; i < statistics.length; i++) {
+        if (usedIndexes.has(i)) {
+            continue;
+        }
+
+        const row = statistics[i];
+        const time = Number(row.Time ?? row.time);
+
+        if (Number.isNaN(time) || Number.isNaN(start) || Number.isNaN(end)) {
+            continue;
+        }
+
+        if (time >= start && time <= end) {
+            usedIndexes.add(i);
+            return row;
+        }
+    }
+
+    return null;
+}
+
+function saveFaceImage(face, groupName, time) {
     const raw = String(face.FaceImage || "").replace(/\s+/g, "");
 
     if (!raw) {
@@ -326,17 +453,23 @@ function saveFaceImage(face) {
         return false;
     }
 
-    const safeId = String(face.UUId || "unknown").replace(/[<>:"/\\|?*]/g, "_");
-    const filename = `${face.StartTime}_${safeId}.jpg`;
-    const outputPath = path.join(OUTPUT_DIR, filename);
+    const filename = `${safeFilenamePart(groupName)}+${time}.jpg`;
+    let outputPath = path.join(OUTPUT_DIR, filename);
 
     if (fs.existsSync(outputPath)) {
-        console.log(`Already exists, skipped: ${filename}`);
-        return false;
+        const fallback = `${safeFilenamePart(groupName)}+${time}_${safeFilenamePart(face.UUId)}.jpg`;
+        outputPath = path.join(OUTPUT_DIR, fallback);
+
+        if (fs.existsSync(outputPath)) {
+            console.log(`Already exists, skipped: ${path.basename(outputPath)}`);
+            rememberUuid(face.UUId);
+            return false;
+        }
     }
 
     fs.writeFileSync(outputPath, jpeg);
-    console.log(`Saved: ${filename} (${jpeg.length} bytes)`);
+    rememberUuid(face.UUId);
+    console.log(`Saved: ${path.basename(outputPath)} (${jpeg.length} bytes)`);
     return true;
 }
 
@@ -345,7 +478,7 @@ async function main() {
         fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
         await login();
-        await getGroups();
+        const groupMap = await getGroups();
 
         const uuids = await getUuids();
 
@@ -355,11 +488,33 @@ async function main() {
         }
 
         const faces = await getFacesById(uuids);
+        const statistics = await getLatestStatistics();
+        const usedStats = new Set();
         let saved = 0;
         let skipped = 0;
+        let unmatched = 0;
 
         for (const face of faces) {
-            if (saveFaceImage(face)) {
+            const stat = matchStatistic(face, statistics, usedStats);
+
+            if (!stat) {
+                unmatched += 1;
+                console.log(
+                    `No FaceStatistics match for ${face.UUId} ` +
+                    `(StartTime=${face.StartTime}, EndTime=${face.EndTime})`
+                );
+                continue;
+            }
+
+            const groupId = Number(stat.Group ?? stat.group);
+            const groupName = groupMap.get(groupId) || `Group ${groupId}`;
+            const time = Number(stat.Time ?? stat.time);
+
+            console.log(
+                `Match ${face.UUId}: Group ${groupId} (${groupName}) Time=${time}`
+            );
+
+            if (saveFaceImage(face, groupName, time)) {
                 saved += 1;
             }
             else {
@@ -370,7 +525,8 @@ async function main() {
         console.log("\n================================");
         console.log(`New images added: ${saved}`);
         console.log(`Skipped: ${skipped}`);
-        console.log(`Folder now has: ${loadSavedUuids().size} file(s)`);
+        console.log(`Unmatched: ${unmatched}`);
+        console.log(`Folder now has: ${loadSavedUuids().size} saved UUID(s)`);
         console.log(`Folder: ${OUTPUT_DIR}`);
         console.log("================================");
     }
