@@ -62,12 +62,55 @@
             margin-top: 0;
         }
 
-        .toolbar {
+        #face-gallery,
+        #matched-face-gallery {
             display: flex;
             flex-wrap: wrap;
             gap: 12px;
-            align-items: end;
-            margin: 16px 0;
+            margin-top: 16px;
+        }
+
+        #face-gallery img,
+        #matched-face-gallery img,
+        #face-thumbnail-gallery img {
+            width: 120px;
+            height: 120px;
+            object-fit: cover;
+            background: #000;
+            border: 1px solid #333;
+        }
+
+        #face-thumbnail-gallery {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .face-thumb {
+            display: flex;
+            flex-direction: column;
+            width: 120px;
+            padding: 0;
+            background: #1a1a1a;
+            border: 2px solid #333;
+            cursor: pointer;
+        }
+
+        .face-thumb.selected {
+            border-color: #3a6ea5;
+        }
+
+        .face-thumb img {
+            border: 0;
+        }
+
+        .face-thumb-caption {
+            font-size: 11px;
+            line-height: 1.3;
+            padding: 6px;
+            color: #ccc;
+            text-align: left;
         }
 
         label {
@@ -256,12 +299,69 @@
 
         </section>
 
+        <section class="recordings">
+            <h2>Face thumbnails</h2>
+            <p class="muted">
+                Images from <code>src/faces/face_images</code>.
+                Click a thumbnail to play the SD recording from
+                5 seconds before the filename timestamp through
+                5 seconds after it.
+            </p>
+            <div class="toolbar">
+                <button id="face-thumbnail-refresh" type="button">Refresh</button>
+            </div>
+            <div id="face-thumbnail-status" class="muted">Loading face thumbnails...</div>
+            <video
+                id="face-clip"
+                controls
+                muted
+                playsinline
+                disablepictureinpicture
+            ></video>
+            <div id="face-thumbnail-gallery"></div>
+        </section>
+
+        <section class="recordings">
+            <h2>Snapped faces</h2>
+            <p class="muted">
+                Face crops are saved to <code>snaps/</code>.
+                The server logs in with <code>/API/Web/Login</code> and keeps
+                that cookie until Node stops. <strong>Fetch all pages</strong>
+                opens the camera web UI in Chrome, intercepts the Snapped faces
+                gallery, and saves every JPEG crop (no Feature vectors).
+            </p>
+            <div class="toolbar">
+                <button id="face-sync" type="button">Fetch all pages</button>
+            </div>
+            <div id="face-status" class="muted">Loading saved faces...</div>
+            <div id="face-gallery"></div>
+        </section>
+
+        <section class="recordings">
+            <h2>Matched faces</h2>
+            <p class="muted">
+                New pipeline: login + heartbeat, then
+                <code>GetByIndex</code> (uuid/count) →
+                <code>GetById</code> (image, start/end) →
+                Face Statistics time inside that window →
+                FDGroup name. Saved as
+                <code>{group}+{time}.jpg</code> in
+                <code>matched-faces/</code>.
+            </p>
+            <div class="toolbar">
+                <button id="matched-face-sync" type="button">Sync matched faces</button>
+            </div>
+            <div id="matched-face-status" class="muted">Loading matched faces...</div>
+            <div id="matched-face-gallery"></div>
+        </section>
+
     </div>
 
 
     <!-- HLS.js -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+    <script src="/faceThumbnails.js"></script>
 
     <script>
 
@@ -706,6 +806,184 @@
 
         loadRecordings().catch((error) => {
             recStatus.innerHTML =
+                `<span class="error">${error.message}</span>`;
+        });
+
+        const faceStatus = document.getElementById("face-status");
+        const faceGallery = document.getElementById("face-gallery");
+
+        async function loadFaces() {
+            const response = await fetch("/api/faces");
+            const data = await response.json();
+            const files = data.files || [];
+            const shown = files.slice(0, 120);
+            const progress = data.progress;
+            const parts = [
+                `${data.count || 0} face image(s) in snaps/`
+            ];
+
+            parts.push(data.loggedIn ? "camera logged in" : "camera login pending");
+
+            if (data.syncing && progress) {
+                parts.push(
+                    `fetching page ${progress.page || "?"}` +
+                    (progress.saved ? ` · ${progress.saved} new` : "")
+                );
+            }
+            else if (data.lastSyncAt) {
+                parts.push(`last sync ${data.lastSyncAt}`);
+            }
+
+            if (data.lastError) {
+                parts.push(data.lastError);
+            }
+
+            faceStatus.innerHTML = data.lastError
+                ? `${parts.slice(0, -1).join(" · ")} · <span class="error">${data.lastError}</span>`
+                : parts.join(" · ");
+
+            faceGallery.innerHTML = shown.map((file) =>
+                `<a href="/snaps/${file.file}" target="_blank">` +
+                `<img src="/snaps/${file.file}" alt="${file.file}"></a>`
+            ).join("") + (
+                files.length > shown.length
+                    ? `<p class="muted">Showing ${shown.length} of ${files.length}. All files are in snaps/.</p>`
+                    : ""
+            );
+
+            return data;
+        }
+
+        let faceSyncPoll = null;
+
+        document.getElementById("face-sync").addEventListener("click", async () => {
+            faceStatus.textContent =
+                "Fetching all camera pages. This can take several minutes...";
+
+            try {
+                const response = await fetch("/api/faces/sync", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ full: true })
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Face sync failed");
+                }
+
+                if (faceSyncPoll) {
+                    clearInterval(faceSyncPoll);
+                }
+
+                faceSyncPoll = setInterval(async () => {
+                    const status = await loadFaces();
+
+                    if (!status.syncing) {
+                        clearInterval(faceSyncPoll);
+                        faceSyncPoll = null;
+                    }
+                }, 2000);
+
+                await loadFaces();
+            }
+            catch (error) {
+                faceStatus.innerHTML =
+                    `<span class="error">${error.message}</span>` +
+                    ` <span class="muted">If the Node server just restarted, wait a second and click again.</span>`;
+            }
+        });
+
+        loadFaces().catch((error) => {
+            faceStatus.innerHTML =
+                `<span class="error">${error.message}</span>`;
+        });
+
+        const matchedStatus = document.getElementById("matched-face-status");
+        const matchedGallery = document.getElementById("matched-face-gallery");
+
+        async function loadMatchedFaces() {
+            const response = await fetch("/api/matched-faces");
+            const data = await response.json();
+            const files = data.files || [];
+            const shown = files.slice(0, 120);
+            const parts = [
+                `${data.count || 0} matched image(s) in matched-faces/`
+            ];
+
+            parts.push(data.loggedIn ? "camera logged in" : "camera login pending");
+
+            if (data.syncing) {
+                parts.push("syncing");
+            }
+            else if (data.lastSyncAt) {
+                parts.push(`last sync ${data.lastSyncAt}`);
+            }
+
+            if (data.lastResult) {
+                parts.push(
+                    `uuids ${data.lastResult.uuids || 0}` +
+                    ` · saved ${data.lastResult.saved || 0}` +
+                    ` · no time match ${data.lastResult.skippedNoMatch || 0}`
+                );
+            }
+
+            matchedStatus.innerHTML = data.lastError
+                ? `${parts.join(" · ")} · <span class="error">${data.lastError}</span>`
+                : parts.join(" · ");
+
+            matchedGallery.innerHTML = shown.map((file) =>
+                `<a href="/matched-faces/${file.file}" target="_blank">` +
+                `<img src="/matched-faces/${file.file}" alt="${file.file}"></a>`
+            ).join("") + (
+                files.length > shown.length
+                    ? `<p class="muted">Showing ${shown.length} of ${files.length}.</p>`
+                    : ""
+            );
+
+            return data;
+        }
+
+        let matchedSyncPoll = null;
+
+        document.getElementById("matched-face-sync").addEventListener("click", async () => {
+            matchedStatus.textContent =
+                "Matching snapped faces to FD groups by time...";
+
+            try {
+                const response = await fetch("/api/matched-faces/sync", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" }
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Matched-face sync failed");
+                }
+
+                if (matchedSyncPoll) {
+                    clearInterval(matchedSyncPoll);
+                }
+
+                matchedSyncPoll = setInterval(async () => {
+                    const status = await loadMatchedFaces();
+
+                    if (!status.syncing) {
+                        clearInterval(matchedSyncPoll);
+                        matchedSyncPoll = null;
+                    }
+                }, 2000);
+
+                await loadMatchedFaces();
+            }
+            catch (error) {
+                matchedStatus.innerHTML =
+                    `<span class="error">${error.message}</span>`;
+            }
+        });
+
+        loadMatchedFaces().catch((error) => {
+            matchedStatus.innerHTML =
                 `<span class="error">${error.message}</span>`;
         });
 

@@ -20,6 +20,32 @@ const {
     stopPlaybackStream
 } = require("./camera/recordings");
 
+const {
+    listSavedFaces,
+    syncSnappedFaces,
+    startFaceSync,
+    stopFaceSync,
+    snapsDir
+} = require("./camera/snappedFaces");
+
+const {
+    listMatchedFaces,
+    syncMatchedFaces,
+    startMatchedFaceSync,
+    stopMatchedFaceSync,
+    matchedFacesDir
+} = require("./faces");
+
+const {
+    listFaceThumbnails,
+    faceImagesDir
+} = require("./faces/faceThumbnails");
+
+const {
+    startFetchFacesLoop,
+    stopFetchFacesLoop
+} = require("./faces/fetchFaces");
+
 const app = express();
 
 app.use(express.json());
@@ -216,6 +242,28 @@ app.use(
     express.static(recordingsDir)
 );
 
+app.use(
+    "/snaps",
+    express.static(snapsDir)
+);
+
+app.use(
+    "/matched-faces",
+    express.static(matchedFacesDir)
+);
+
+app.use(
+    "/face-images",
+    express.static(faceImagesDir, {
+        setHeaders: (res) => {
+            res.setHeader(
+                "Cache-Control",
+                "no-cache, no-store, must-revalidate"
+            );
+        }
+    })
+);
+
 // --------------------------------------------------
 // Health endpoint
 // --------------------------------------------------
@@ -374,6 +422,64 @@ app.get("/api/recordings/stream", async (req, res) => {
 });
 
 // --------------------------------------------------
+// Snapped face images
+// --------------------------------------------------
+
+app.get("/api/faces", (req, res) => {
+    res.json(listSavedFaces());
+});
+
+app.post("/api/faces/sync", (req, res) => {
+    const full = Boolean(req.body && req.body.full);
+    const current = listSavedFaces();
+
+    if (current.syncing) {
+        res.json({
+            started: false,
+            skipped: true,
+            reason: "sync already running",
+            ...current
+        });
+        return;
+    }
+
+    syncSnappedFaces({ full }).catch(() => {});
+    res.json({
+        started: true,
+        full,
+        ...listSavedFaces()
+    });
+});
+
+app.get("/api/matched-faces", (req, res) => {
+    res.json(listMatchedFaces());
+});
+
+app.get("/api/face-thumbnails", (req, res) => {
+    res.json(listFaceThumbnails());
+});
+
+app.post("/api/matched-faces/sync", (req, res) => {
+    const current = listMatchedFaces();
+
+    if (current.syncing) {
+        res.json({
+            started: false,
+            skipped: true,
+            reason: "sync already running",
+            ...current
+        });
+        return;
+    }
+
+    syncMatchedFaces().catch(() => {});
+    res.json({
+        started: true,
+        ...listMatchedFaces()
+    });
+});
+
+// --------------------------------------------------
 // Start server
 // --------------------------------------------------
 
@@ -390,17 +496,22 @@ app.listen(PORT, async () => {
     startFFmpeg();
 
     await startONVIF();
+
+    startFetchFacesLoop();
 });
 
 // --------------------------------------------------
 // Graceful shutdown
 // --------------------------------------------------
 
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
 
     console.log("\nShutting down...");
 
     stopPlaybackStream();
+    await stopFaceSync();
+    stopMatchedFaceSync();
+    stopFetchFacesLoop();
 
     process.exit(0);
 

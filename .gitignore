@@ -3,3 +3,7 @@ node_modules/
 
 streams/
 recordings/
+snaps/
+matched-faces/
+src/faces/face_images/
+.chrome-camera/

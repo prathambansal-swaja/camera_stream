@@ -13,6 +13,7 @@ const BASE_URL = `https://${CAMERA_IP}`;
 const PAGE_SIZE = 21;
 const MAX_UUIDS = 21;
 const STATS_PAGES = 3;
+const POLL_INTERVAL_MS = 20000;
 const OUTPUT_DIR = path.join(__dirname, "face_images");
 const UUID_INDEX = path.join(OUTPUT_DIR, ".saved-uuids.json");
 
@@ -27,6 +28,11 @@ const digestAuth = new AxiosDigestAuth({
 
 let sessionCookie = null;
 let csrfToken = null;
+let groupMapCache = null;
+let verbose = true;
+let loopRunning = false;
+let loopTimer = null;
+let loopInFlight = false;
 
 function cameraTimestamp(date = new Date()) {
     const pad = (value) => String(value).padStart(2, "0");
@@ -109,6 +115,34 @@ async function login() {
     console.log("Login successful.\n");
 }
 
+async function heartbeat() {
+    await apiRequest({
+        method: "POST",
+        url: `${BASE_URL}/API/Login/Heartbeat?${cameraTimestamp()}`,
+        data: {
+            version: "1.0",
+            data: {},
+            actionType: "create"
+        }
+    });
+}
+
+async function ensureSession() {
+    if (sessionCookie && csrfToken && groupMapCache) {
+        return groupMapCache;
+    }
+
+    await login();
+    groupMapCache = await getGroups();
+    return groupMapCache;
+}
+
+function resetSession() {
+    sessionCookie = null;
+    csrfToken = null;
+    groupMapCache = null;
+}
+
 async function apiRequest(options) {
     const headers = {
         Accept: "application/json; charset=utf-8",
@@ -123,8 +157,10 @@ async function apiRequest(options) {
             "Chrome/151.0.0.0 Safari/537.36"
     };
 
-    console.log("\nAPI REQUEST:");
-    console.log(options.method, options.url);
+    if (verbose) {
+        console.log("\nAPI REQUEST:");
+        console.log(options.method, options.url);
+    }
 
     const response = await axios({
         ...options,
@@ -229,7 +265,9 @@ function safeFilenamePart(value) {
 }
 
 async function getUuids() {
-    console.log("Fetching latest snapped-face UUIDs...");
+    if (verbose) {
+        console.log("Fetching latest snapped-face UUIDs...");
+    }
 
     const window = searchWindow();
     const savedUuids = loadSavedUuids();
@@ -251,8 +289,10 @@ async function getUuids() {
     const searchCount = Number(search.data?.Count || 0);
     const startIndex = Math.max(0, searchCount - PAGE_SIZE);
 
-    console.log("SnapedFaces Search Count:", searchCount);
-    console.log("GetByIndex StartIndex (latest page):", startIndex);
+    if (verbose) {
+        console.log("SnapedFaces Search Count:", searchCount);
+        console.log("GetByIndex StartIndex (latest page):", startIndex);
+    }
 
     const index = await apiRequest({
         method: "POST",
@@ -285,21 +325,23 @@ async function getUuids() {
         .filter(Boolean)
         .filter((uuid) => !savedUuids.has(uuid));
 
-    console.log(
-        `GetByIndex returned ${faces.length} face(s), ` +
-        `TotalCount=${index.data?.TotalCount}, Count=${index.data?.Count}`
-    );
+    if (verbose) {
+        console.log(
+            `GetByIndex returned ${faces.length} face(s), ` +
+            `TotalCount=${index.data?.TotalCount}, Count=${index.data?.Count}`
+        );
 
-    if (latest[0]) {
-        console.log("Newest face on this page:", {
-            UUId: latest[0].UUId,
-            StartTime: latest[0].StartTime,
-            EndTime: latest[0].EndTime
-        });
+        if (latest[0]) {
+            console.log("Newest face on this page:", {
+                UUId: latest[0].UUId,
+                StartTime: latest[0].StartTime,
+                EndTime: latest[0].EndTime
+            });
+        }
+
+        console.log(`Already saved: ${savedUuids.size}`);
+        console.log(`New UUIDs to fetch: ${uuids.length}`);
     }
-
-    console.log(`Already saved: ${savedUuids.size}`);
-    console.log(`New UUIDs to fetch: ${uuids.length}`);
 
     return uuids;
 }
@@ -309,7 +351,9 @@ async function getFacesById(uuids) {
         return [];
     }
 
-    console.log(`Fetching ${uuids.length} face(s) via GetById...`);
+    if (verbose) {
+        console.log(`Fetching ${uuids.length} face(s) via GetById...`);
+    }
 
     const response = await apiRequest({
         method: "POST",
@@ -330,23 +374,27 @@ async function getFacesById(uuids) {
     });
 
     const faces = response.data?.SnapedFaceInfo || [];
-    console.log(`GetById Count: ${response.data?.Count}, faces: ${faces.length}`);
+    if (verbose) {
+        console.log(`GetById Count: ${response.data?.Count}, faces: ${faces.length}`);
 
-    if (faces[0]) {
-        console.log("First face:", {
-            UUId: faces[0].UUId,
-            StartTime: faces[0].StartTime,
-            EndTime: faces[0].EndTime,
-            SnapId: faces[0].SnapId,
-            hasFaceImage: Boolean(faces[0].FaceImage)
-        });
+        if (faces[0]) {
+            console.log("First face:", {
+                UUId: faces[0].UUId,
+                StartTime: faces[0].StartTime,
+                EndTime: faces[0].EndTime,
+                SnapId: faces[0].SnapId,
+                hasFaceImage: Boolean(faces[0].FaceImage)
+            });
+        }
     }
 
     return faces;
 }
 
 async function getLatestStatistics() {
-    console.log("Fetching latest Face Statistics...");
+    if (verbose) {
+        console.log("Fetching latest Face Statistics...");
+    }
 
     const window = searchWindow();
 
@@ -367,8 +415,10 @@ async function getLatestStatistics() {
     const fetchCount = PAGE_SIZE * STATS_PAGES;
     const startIndex = Math.max(0, searchCount - fetchCount);
 
-    console.log("FaceStatistics Search Count:", searchCount);
-    console.log("FaceStatistics StartIndex (latest pages):", startIndex);
+    if (verbose) {
+        console.log("FaceStatistics Search Count:", searchCount);
+        console.log("FaceStatistics StartIndex (latest pages):", startIndex);
+    }
 
     const stats = [];
 
@@ -392,10 +442,12 @@ async function getLatestStatistics() {
         const page = response.data?.Statistics || [];
         stats.push(...page);
 
-        console.log(
-            `FaceStatistics Get StartIndex=${index} Count=${count} ` +
-            `returned ${page.length}`
-        );
+        if (verbose) {
+            console.log(
+                `FaceStatistics Get StartIndex=${index} Count=${count} ` +
+                `returned ${page.length}`
+            );
+        }
     }
 
     if (stats[0]) {
@@ -407,7 +459,9 @@ async function getLatestStatistics() {
             }
         }
 
-        console.log("First statistic:", sample);
+        if (verbose) {
+            console.log("First statistic:", sample);
+        }
     }
 
     return stats;
@@ -473,71 +527,124 @@ function saveFaceImage(face, groupName, time) {
     return true;
 }
 
-async function main() {
+async function fetchLatestFaces() {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+    let groupMap;
+
     try {
-        fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+        groupMap = await ensureSession();
+        await heartbeat();
+    }
+    catch (error) {
+        resetSession();
+        groupMap = await ensureSession();
+    }
 
-        await login();
-        const groupMap = await getGroups();
+    const uuids = await getUuids();
 
-        const uuids = await getUuids();
+    if (!uuids.length) {
+        console.log("[fetchFaces] No new faces.");
+        return { saved: 0, skipped: 0, unmatched: 0 };
+    }
 
-        if (!uuids.length) {
-            console.log("Latest 21 faces are already in the folder. Nothing new to add.");
+    const faces = await getFacesById(uuids);
+    const statistics = await getLatestStatistics();
+    const usedStats = new Set();
+    let saved = 0;
+    let skipped = 0;
+    let unmatched = 0;
+
+    for (const face of faces) {
+        const stat = matchStatistic(face, statistics, usedStats);
+
+        if (!stat) {
+            unmatched += 1;
+            console.log(
+                `No FaceStatistics match for ${face.UUId} ` +
+                `(StartTime=${face.StartTime}, EndTime=${face.EndTime})`
+            );
+            continue;
+        }
+
+        const groupId = Number(stat.Group ?? stat.group);
+        const groupName = groupMap.get(groupId) || `Group ${groupId}`;
+        const time = Number(stat.Time ?? stat.time);
+
+        console.log(
+            `Match ${face.UUId}: Group ${groupId} (${groupName}) Time=${time}`
+        );
+
+        if (saveFaceImage(face, groupName, time)) {
+            saved += 1;
+        }
+        else {
+            skipped += 1;
+        }
+    }
+
+    console.log(
+        `[fetchFaces] added ${saved}, skipped ${skipped}, unmatched ${unmatched}`
+    );
+
+    return { saved, skipped, unmatched };
+}
+
+function startFetchFacesLoop(intervalMs = POLL_INTERVAL_MS) {
+    if (loopRunning) {
+        return;
+    }
+
+    loopRunning = true;
+    verbose = false;
+
+    const tick = async () => {
+        if (!loopRunning || loopInFlight) {
             return;
         }
 
-        const faces = await getFacesById(uuids);
-        const statistics = await getLatestStatistics();
-        const usedStats = new Set();
-        let saved = 0;
-        let skipped = 0;
-        let unmatched = 0;
+        loopInFlight = true;
 
-        for (const face of faces) {
-            const stat = matchStatistic(face, statistics, usedStats);
-
-            if (!stat) {
-                unmatched += 1;
-                console.log(
-                    `No FaceStatistics match for ${face.UUId} ` +
-                    `(StartTime=${face.StartTime}, EndTime=${face.EndTime})`
-                );
-                continue;
-            }
-
-            const groupId = Number(stat.Group ?? stat.group);
-            const groupName = groupMap.get(groupId) || `Group ${groupId}`;
-            const time = Number(stat.Time ?? stat.time);
-
-            console.log(
-                `Match ${face.UUId}: Group ${groupId} (${groupName}) Time=${time}`
+        try {
+            await fetchLatestFaces();
+        }
+        catch (error) {
+            resetSession();
+            console.error(
+                "[fetchFaces]",
+                error.response?.data || error.message || error
             );
+        }
+        finally {
+            loopInFlight = false;
 
-            if (saveFaceImage(face, groupName, time)) {
-                saved += 1;
-            }
-            else {
-                skipped += 1;
+            if (loopRunning) {
+                loopTimer = setTimeout(tick, intervalMs);
             }
         }
+    };
 
-        console.log("\n================================");
-        console.log(`New images added: ${saved}`);
-        console.log(`Skipped: ${skipped}`);
-        console.log(`Unmatched: ${unmatched}`);
-        console.log(`Folder now has: ${loadSavedUuids().size} saved UUID(s)`);
-        console.log(`Folder: ${OUTPUT_DIR}`);
-        console.log("================================");
-    }
-    catch (error) {
-        console.error("\nERROR:");
-        console.error(
-            error.response?.data ||
-            error.message ||
-            error
-        );
+    console.log(
+        `[fetchFaces] polling latest faces every ${intervalMs / 1000}s`
+    );
+    tick();
+}
+
+function stopFetchFacesLoop() {
+    loopRunning = false;
+
+    if (loopTimer) {
+        clearTimeout(loopTimer);
+        loopTimer = null;
     }
 }
 
-main();
+module.exports = {
+    fetchLatestFaces,
+    startFetchFacesLoop,
+    stopFetchFacesLoop
+};
+
+if (require.main === module) {
+    startFetchFacesLoop();
+}
