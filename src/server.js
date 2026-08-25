@@ -1,8 +1,27 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 require("dotenv").config();
+
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+
+if (nodeMajor < 20) {
+    console.error(
+        `This app needs Node.js 20 or newer. This machine has ${process.version}.`
+    );
+    process.exit(1);
+}
+
+try {
+    execSync("ffmpeg -version", { stdio: "pipe" });
+}
+catch (_error) {
+    console.error(
+        "FFmpeg is missing or not on PATH. Install FFmpeg, then restart."
+    );
+    process.exit(1);
+}
 
 const {
     startONVIF

@@ -4,22 +4,27 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@mhoc/axios-digest-auth": "^0.8.0",
     "axios": "^1.19.0",
-    "axios-cookiejar-support": "^7.0.0",
+    "axios-cookiejar-support": "^7.0.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "https": "^1.0.0",
     "onvif": "^0.8.2",
-    "puppeteer": "^25.8.0",
     "tough-cookie": "^6.0.2",
     "undici": "^8.10.0"
+  },
+  "optionalDependencies": {
+    "puppeteer": "^25.8.0"
   }
 }
