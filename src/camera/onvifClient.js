@@ -94,7 +94,7 @@ async function startONVIF() {
 
                     console.error(
                         "Error processing camera event:",
-                        error
+                        error.message || error
                     );
 
                 }
