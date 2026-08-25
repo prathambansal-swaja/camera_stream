@@ -46,9 +46,10 @@
             max-width: 1600px;
         }
 
-        .live-pane h2 {
-            margin: 0 0 10px;
-            font-size: 16px;
+        .live-mjpeg {
+            width: 100%;
+            background: black;
+            display: block;
         }
 
         .live-pane .status {
@@ -221,6 +222,12 @@
                     muted
                     playsinline
                 ></video>
+                <img
+                    id="mjpeg1"
+                    class="live-mjpeg"
+                    alt="Camera 1"
+                    hidden
+                >
                 <div id="status" class="status">
                     Connecting to camera 1...
                 </div>
@@ -235,6 +242,12 @@
                     muted
                     playsinline
                 ></video>
+                <img
+                    id="mjpeg2"
+                    class="live-mjpeg"
+                    alt="Camera 2"
+                    hidden
+                >
                 <div id="status2" class="status">
                     Connecting to camera 2...
                 </div>
@@ -410,8 +423,25 @@
 
     <script>
 
+        function canPlayH264() {
+            const probe = document.createElement("video");
+            const type = probe.canPlayType(
+                'video/mp4; codecs="avc1.42E01E"'
+            );
+            return Boolean(window.MediaSource) && type !== "";
+        }
+
+        function showMjpeg(video, image, status, cameraId, label) {
+            video.hidden = true;
+            video.removeAttribute("src");
+            video.load();
+            image.hidden = false;
+            image.src = `/api/cameras/${cameraId}/mjpeg?t=${Date.now()}`;
+            status.textContent = `${label} connected (compatibility mode)`;
+        }
+
         async function waitForPlaylist(streamUrl) {
-            for (let attempt = 0; attempt < 40; attempt += 1) {
+            for (let attempt = 0; attempt < 20; attempt += 1) {
                 try {
                     const response = await fetch(streamUrl, { cache: "no-store" });
                     if (response.ok) {
@@ -431,13 +461,18 @@
             return false;
         }
 
-        async function attachLiveStream(video, status, streamUrl, label) {
+        async function attachLiveStream(video, image, status, streamUrl, cameraId, label) {
             status.textContent = `${label} starting...`;
+
+            if (!canPlayH264() || typeof Hls === "undefined") {
+                showMjpeg(video, image, status, cameraId, label);
+                return;
+            }
 
             const ready = await waitForPlaylist(streamUrl);
 
             if (!ready) {
-                status.textContent = `${label} stream not ready. Restart the server if this continues.`;
+                showMjpeg(video, image, status, cameraId, label);
                 return;
             }
 
@@ -454,9 +489,20 @@
                 hls.loadSource(streamUrl);
                 hls.attachMedia(video);
 
+                const fallbackTimer = setTimeout(() => {
+                    if (video.videoWidth === 0) {
+                        hls.destroy();
+                        showMjpeg(video, image, status, cameraId, label);
+                    }
+                }, 8000);
+
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                     status.textContent = `${label} connected`;
-                    video.play();
+                    Promise.resolve(video.play()).catch(() => {
+                        clearTimeout(fallbackTimer);
+                        hls.destroy();
+                        showMjpeg(video, image, status, cameraId, label);
+                    });
                 });
 
                 hls.on(Hls.Events.ERROR, (event, data) => {
@@ -468,7 +514,9 @@
                     }
 
                     if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                        hls.recoverMediaError();
+                        clearTimeout(fallbackTimer);
+                        hls.destroy();
+                        showMjpeg(video, image, status, cameraId, label);
                         return;
                     }
 
@@ -477,9 +525,14 @@
                         return;
                     }
 
-                    status.textContent =
-                        `${label} stream error: ` + data.details;
+                    clearTimeout(fallbackTimer);
+                    hls.destroy();
+                    showMjpeg(video, image, status, cameraId, label);
                 });
+
+                video.addEventListener("playing", () => {
+                    clearTimeout(fallbackTimer);
+                }, { once: true });
 
                 return;
             }
@@ -493,21 +546,24 @@
                 return;
             }
 
-            status.textContent =
-                `${label}: HLS is not supported by this browser`;
+            showMjpeg(video, image, status, cameraId, label);
         }
 
         attachLiveStream(
             document.getElementById("video"),
+            document.getElementById("mjpeg1"),
             document.getElementById("status"),
             "/streams/camera1/index.m3u8",
+            "camera1",
             "Camera 1"
         );
 
         attachLiveStream(
             document.getElementById("video2"),
+            document.getElementById("mjpeg2"),
             document.getElementById("status2"),
             "/streams/camera2/index.m3u8",
+            "camera2",
             "Camera 2"
         );
 

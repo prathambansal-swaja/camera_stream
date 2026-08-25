@@ -91,6 +91,7 @@ const publicDir = path.join(__dirname, "..", "public");
 const streamsRoot = path.join(__dirname, "..", "streams");
 
 let shuttingDown = false;
+const mjpegProcesses = new Set();
 
 function cameraRtspUrl({ ip, port, username, password, channel, subtype }) {
     return (
@@ -262,6 +263,72 @@ function startLiveStreams() {
 app.use(
     express.static(publicDir)
 );
+
+app.get("/api/cameras/:id/mjpeg", (req, res) => {
+    const camera = liveCameras.find((item) => item.id === req.params.id);
+
+    if (!camera) {
+        res.status(404).json({ error: "Camera not found" });
+        return;
+    }
+
+    res.status(200);
+    res.setHeader(
+        "Content-Type",
+        "multipart/x-mixed-replace; boundary=ffmpeg"
+    );
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Connection", "close");
+
+    const ffmpeg = spawn("ffmpeg", [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        camera.rtspUrl,
+        "-an",
+        "-vf",
+        "fps=8,scale=1280:-2",
+        "-q:v",
+        "7",
+        "-f",
+        "mpjpeg",
+        "pipe:1"
+    ]);
+
+    mjpegProcesses.add(ffmpeg);
+    ffmpeg.stdout.pipe(res);
+
+    const stop = () => {
+        mjpegProcesses.delete(ffmpeg);
+        try {
+            ffmpeg.kill("SIGKILL");
+        }
+        catch (_error) {
+            // ignore
+        }
+    };
+
+    req.on("close", stop);
+    res.on("close", stop);
+
+    ffmpeg.on("error", (error) => {
+        console.error(`MJPEG ${camera.label} failed:`, error.message);
+        stop();
+        if (!res.writableEnded) {
+            res.end();
+        }
+    });
+
+    ffmpeg.on("close", () => {
+        mjpegProcesses.delete(ffmpeg);
+        if (!res.writableEnded) {
+            res.end();
+        }
+    });
+});
 
 // --------------------------------------------------
 // Serve HLS stream
@@ -565,6 +632,15 @@ process.on("SIGINT", async () => {
     for (const camera of liveCameras) {
         try {
             camera.process?.kill();
+        }
+        catch (_error) {
+            // ignore
+        }
+    }
+
+    for (const ffmpeg of mjpegProcesses) {
+        try {
+            ffmpeg.kill("SIGKILL");
         }
         catch (_error) {
             // ignore
