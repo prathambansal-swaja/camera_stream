@@ -86,7 +86,7 @@
 
     function render(files) {
         if (!files.length) {
-            gallery.innerHTML = '<p class="muted">No face thumbnails yet. Run fetchFaces.js first.</p>';
+            gallery.innerHTML = '<p class="muted">Waiting for the latest faces from the camera...</p>';
             return;
         }
 
@@ -125,7 +125,7 @@
         }
 
         setStatus(
-            `${data.count || 0} thumbnail(s). Click one to play 5s before and after from the SD card.`
+            `${data.count || 0} live thumbnail(s). Click one to play 5s before and after from the SD card.`
         );
         render(data.files || []);
         return data;
@@ -142,4 +142,8 @@
     loadThumbnails().catch((error) => {
         setStatus(`<span class="error">${error.message}</span>`);
     });
+
+    setInterval(() => {
+        loadThumbnails().catch(() => {});
+    }, 20000);
 })();

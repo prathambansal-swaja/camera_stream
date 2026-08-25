@@ -1,32 +1,9 @@
-const fs = require("fs");
-const path = require("path");
-
 const PAD_SECONDS = 5;
-const faceImagesDir = path.join(__dirname, "face_images");
 
-function parseFaceFilename(filename) {
-    const base = String(filename || "").replace(/\.jpe?g$/i, "");
-
-    const named = base.match(/^(.+)\+(\d{9,})(?:_.+)?$/);
-
-    if (named) {
-        return {
-            group: named[1].trim() || "Unknown",
-            unix: Number(named[2])
-        };
-    }
-
-    const numbered = base.match(/^(\d{9,})_(.+)$/);
-
-    if (numbered) {
-        return {
-            group: "Unknown",
-            unix: Number(numbered[1])
-        };
-    }
-
-    return null;
-}
+const {
+    listLiveFaces,
+    getLiveFaceJpeg
+} = require("./fetchFaces");
 
 function cameraUnixToDate(unix) {
     const utc = new Date(Number(unix) * 1000);
@@ -56,49 +33,23 @@ function clipRangeFromUnix(unix) {
 }
 
 function listFaceThumbnails() {
-    if (!fs.existsSync(faceImagesDir)) {
-        return {
-            count: 0,
-            files: [],
-            folder: faceImagesDir
-        };
-    }
-
-    const files = fs.readdirSync(faceImagesDir)
-        .filter((name) => /\.jpe?g$/i.test(name))
-        .map((name) => {
-            const parsed = parseFaceFilename(name);
-
-            if (!parsed) {
-                return null;
-            }
-
-            const range = clipRangeFromUnix(parsed.unix);
-            const fullPath = path.join(faceImagesDir, name);
-            const stat = fs.statSync(fullPath);
-
-            return {
-                file: name,
-                url: `/face-images/${encodeURIComponent(name)}`,
-                group: parsed.group,
-                ...range,
-                mtimeMs: stat.mtimeMs
-            };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.time - a.time);
+    const files = listLiveFaces().map((item) => ({
+        file: item.uuid,
+        url: `/api/face-thumbnails/${encodeURIComponent(item.uuid)}/image`,
+        group: item.group,
+        ...clipRangeFromUnix(item.time),
+        mtimeMs: item.fetchedAt
+    }));
 
     return {
         count: files.length,
-        files,
-        folder: faceImagesDir
+        files
     };
 }
 
 module.exports = {
     PAD_SECONDS,
-    faceImagesDir,
-    parseFaceFilename,
     clipRangeFromUnix,
-    listFaceThumbnails
+    listFaceThumbnails,
+    getLiveFaceJpeg
 };

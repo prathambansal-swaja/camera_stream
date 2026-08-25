@@ -36,14 +36,40 @@
 
         video {
             width: 100%;
-            max-width: 1200px;
             background: black;
+        }
+
+        .live-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            max-width: 1600px;
+        }
+
+        .live-pane h2 {
+            margin: 0 0 10px;
+            font-size: 16px;
+        }
+
+        .live-pane .status {
+            margin-top: 10px;
+            padding: 10px;
+            background: #222;
+        }
+
+        @media (max-width: 900px) {
+            .live-grid {
+                grid-template-columns: 1fr;
+            }
         }
 
         /* Live stream: hide seek/duration bar (meaningless for live) */
         #video::-webkit-media-controls-timeline,
         #video::-webkit-media-controls-current-time-display,
-        #video::-webkit-media-controls-time-remaining-display {
+        #video::-webkit-media-controls-time-remaining-display,
+        #video2::-webkit-media-controls-timeline,
+        #video2::-webkit-media-controls-current-time-display,
+        #video2::-webkit-media-controls-time-remaining-display {
             display: none !important;
         }
 
@@ -184,16 +210,36 @@
 
     <div class="container">
 
-        <video
-            id="video"
-            controls
-            autoplay
-            muted
-            playsinline
-        ></video>
+        <div class="live-grid">
 
-        <div id="status">
-            Connecting to camera...
+            <div class="live-pane">
+                <h2>Camera 1 — 192.168.1.2</h2>
+                <video
+                    id="video"
+                    controls
+                    autoplay
+                    muted
+                    playsinline
+                ></video>
+                <div id="status" class="status">
+                    Connecting to camera 1...
+                </div>
+            </div>
+
+            <div class="live-pane">
+                <h2>Camera 2 — 192.168.1.3</h2>
+                <video
+                    id="video2"
+                    controls
+                    autoplay
+                    muted
+                    playsinline
+                ></video>
+                <div id="status2" class="status">
+                    Connecting to camera 2...
+                </div>
+            </div>
+
         </div>
 
         <section class="recordings">
@@ -302,10 +348,9 @@
         <section class="recordings">
             <h2>Face thumbnails</h2>
             <p class="muted">
-                Images from <code>src/faces/face_images</code>.
-                Click a thumbnail to play the SD recording from
-                5 seconds before the filename timestamp through
-                5 seconds after it.
+                Latest faces from the camera, labeled with group name and time.
+                Click a thumbnail to play the SD recording from 5 seconds
+                before that time through 5 seconds after it.
             </p>
             <div class="toolbar">
                 <button id="face-thumbnail-refresh" type="button">Refresh</button>
@@ -365,86 +410,106 @@
 
     <script>
 
-        const video = document.getElementById("video");
+        async function waitForPlaylist(streamUrl) {
+            for (let attempt = 0; attempt < 40; attempt += 1) {
+                try {
+                    const response = await fetch(streamUrl, { cache: "no-store" });
+                    if (response.ok) {
+                        const text = await response.text();
+                        if (text.includes("#EXTINF")) {
+                            return true;
+                        }
+                    }
+                }
+                catch (_error) {
+                    // playlist not ready yet
+                }
 
-        const status = document.getElementById("status");
+                await new Promise((resolve) => setTimeout(resolve, 500));
+            }
 
-        const streamUrl =
-            "/streams/camera1/index.m3u8";
-
-
-        if (Hls.isSupported()) {
-
-            const hls = new Hls({
-                liveSyncDurationCount: 1,
-                liveMaxLatencyDurationCount: 3,
-                liveDurationInfinity: true,
-                maxBufferLength: 2,
-                maxMaxBufferLength: 4,
-                lowLatencyMode: true
-            });
-
-            hls.loadSource(streamUrl);
-
-            hls.attachMedia(video);
-
-
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-
-                console.log("HLS manifest loaded");
-
-                status.textContent =
-                    "Camera stream connected";
-
-                video.play();
-
-            });
-
-
-            hls.on(Hls.Events.ERROR, (event, data) => {
-
-                console.error(
-                    "HLS error:",
-                    data
-                );
-
-                status.textContent =
-                    "Stream error: " + data.details;
-
-            });
-
+            return false;
         }
 
-        else if (
-            video.canPlayType(
-                "application/vnd.apple.mpegurl"
-            )
-        ) {
+        async function attachLiveStream(video, status, streamUrl, label) {
+            status.textContent = `${label} starting...`;
 
-            // Safari / native HLS
+            const ready = await waitForPlaylist(streamUrl);
 
-            video.src = streamUrl;
+            if (!ready) {
+                status.textContent = `${label} stream not ready. Restart the server if this continues.`;
+                return;
+            }
 
-            video.addEventListener(
-                "loadedmetadata",
-                () => {
+            if (Hls.isSupported()) {
+                const hls = new Hls({
+                    liveSyncDurationCount: 1,
+                    liveMaxLatencyDurationCount: 3,
+                    liveDurationInfinity: true,
+                    maxBufferLength: 3,
+                    maxMaxBufferLength: 6,
+                    lowLatencyMode: true
+                });
+
+                hls.loadSource(streamUrl);
+                hls.attachMedia(video);
+
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    status.textContent = `${label} connected`;
+                    video.play();
+                });
+
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (
+                        data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+                        !data.fatal
+                    ) {
+                        return;
+                    }
+
+                    if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                        hls.recoverMediaError();
+                        return;
+                    }
+
+                    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                        hls.startLoad();
+                        return;
+                    }
 
                     status.textContent =
-                        "Camera stream connected";
+                        `${label} stream error: ` + data.details;
+                });
 
+                return;
+            }
+
+            if (video.canPlayType("application/vnd.apple.mpegurl")) {
+                video.src = streamUrl;
+                video.addEventListener("loadedmetadata", () => {
+                    status.textContent = `${label} connected`;
                     video.play();
-
-                }
-            );
-
-        }
-
-        else {
+                });
+                return;
+            }
 
             status.textContent =
-                "HLS is not supported by this browser";
-
+                `${label}: HLS is not supported by this browser`;
         }
+
+        attachLiveStream(
+            document.getElementById("video"),
+            document.getElementById("status"),
+            "/streams/camera1/index.m3u8",
+            "Camera 1"
+        );
+
+        attachLiveStream(
+            document.getElementById("video2"),
+            document.getElementById("status2"),
+            "/streams/camera2/index.m3u8",
+            "Camera 2"
+        );
 
 
         function toLocalInputValue(date) {

@@ -2,8 +2,6 @@ const axios = require("axios");
 const AxiosDigestAuth =
     require("@mhoc/axios-digest-auth").default;
 const https = require("https");
-const fs = require("fs");
-const path = require("path");
 
 const CAMERA_IP = "192.168.1.2";
 const USERNAME = "admin";
@@ -14,8 +12,6 @@ const PAGE_SIZE = 21;
 const MAX_UUIDS = 21;
 const STATS_PAGES = 3;
 const POLL_INTERVAL_MS = 20000;
-const OUTPUT_DIR = path.join(__dirname, "face_images");
-const UUID_INDEX = path.join(OUTPUT_DIR, ".saved-uuids.json");
 
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false
@@ -33,6 +29,7 @@ let verbose = true;
 let loopRunning = false;
 let loopTimer = null;
 let loopInFlight = false;
+const liveFaces = new Map();
 
 function cameraTimestamp(date = new Date()) {
     const pad = (value) => String(value).padStart(2, "0");
@@ -214,54 +211,36 @@ async function getGroups() {
     return groupMap;
 }
 
-function loadSavedUuids() {
-    const ids = new Set();
+function decodeFaceJpeg(face) {
+    const raw = String(face.FaceImage || "").replace(/\s+/g, "");
 
-    if (fs.existsSync(UUID_INDEX)) {
-        try {
-            const listed = JSON.parse(fs.readFileSync(UUID_INDEX, "utf8"));
-
-            for (const id of listed) {
-                if (id) {
-                    ids.add(String(id));
-                }
-            }
-        }
-        catch (error) {
-            console.log("Could not read UUID index:", error.message);
-        }
+    if (!raw) {
+        return null;
     }
 
-    if (!fs.existsSync(OUTPUT_DIR)) {
-        return ids;
+    const jpeg = Buffer.from(raw, "base64");
+
+    if (jpeg.length < 16 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+        return null;
     }
 
-    for (const file of fs.readdirSync(OUTPUT_DIR)) {
-        const match = String(file).match(/_([^_]+)\.jpg$/i);
-
-        if (match) {
-            ids.add(match[1]);
-        }
-    }
-
-    return ids;
+    return jpeg;
 }
 
-function rememberUuid(uuid) {
-    if (!uuid) {
-        return;
-    }
-
-    const ids = loadSavedUuids();
-    ids.add(String(uuid));
-    fs.writeFileSync(UUID_INDEX, JSON.stringify([...ids], null, 2));
+function listLiveFaces() {
+    return [...liveFaces.values()].sort((a, b) => b.time - a.time);
 }
 
-function safeFilenamePart(value) {
-    return String(value || "Unknown")
-        .replace(/[<>:"/\\|?*]/g, "_")
-        .replace(/\s+/g, " ")
-        .trim() || "Unknown";
+function getLiveFaceJpeg(uuid) {
+    return liveFaces.get(String(uuid || ""))?.jpeg || null;
+}
+
+function setLiveGallery(entries) {
+    liveFaces.clear();
+
+    for (const entry of entries) {
+        liveFaces.set(entry.uuid, entry);
+    }
 }
 
 async function getUuids() {
@@ -270,7 +249,6 @@ async function getUuids() {
     }
 
     const window = searchWindow();
-    const savedUuids = loadSavedUuids();
 
     const search = await apiRequest({
         method: "POST",
@@ -322,8 +300,7 @@ async function getUuids() {
 
     const uuids = latest
         .map((face) => face.UUId)
-        .filter(Boolean)
-        .filter((uuid) => !savedUuids.has(uuid));
+        .filter(Boolean);
 
     if (verbose) {
         console.log(
@@ -339,8 +316,7 @@ async function getUuids() {
             });
         }
 
-        console.log(`Already saved: ${savedUuids.size}`);
-        console.log(`New UUIDs to fetch: ${uuids.length}`);
+        console.log(`Latest UUIDs: ${uuids.length}`);
     }
 
     return uuids;
@@ -492,44 +468,7 @@ function matchStatistic(face, statistics, usedIndexes) {
     return null;
 }
 
-function saveFaceImage(face, groupName, time) {
-    const raw = String(face.FaceImage || "").replace(/\s+/g, "");
-
-    if (!raw) {
-        console.log(`No FaceImage for ${face.UUId}`);
-        return false;
-    }
-
-    const jpeg = Buffer.from(raw, "base64");
-
-    if (jpeg.length < 16 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
-        console.log(`FaceImage is not JPEG for ${face.UUId}`);
-        return false;
-    }
-
-    const filename = `${safeFilenamePart(groupName)}+${time}.jpg`;
-    let outputPath = path.join(OUTPUT_DIR, filename);
-
-    if (fs.existsSync(outputPath)) {
-        const fallback = `${safeFilenamePart(groupName)}+${time}_${safeFilenamePart(face.UUId)}.jpg`;
-        outputPath = path.join(OUTPUT_DIR, fallback);
-
-        if (fs.existsSync(outputPath)) {
-            console.log(`Already exists, skipped: ${path.basename(outputPath)}`);
-            rememberUuid(face.UUId);
-            return false;
-        }
-    }
-
-    fs.writeFileSync(outputPath, jpeg);
-    rememberUuid(face.UUId);
-    console.log(`Saved: ${path.basename(outputPath)} (${jpeg.length} bytes)`);
-    return true;
-}
-
 async function fetchLatestFaces() {
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-
     let groupMap;
 
     try {
@@ -544,18 +483,38 @@ async function fetchLatestFaces() {
     const uuids = await getUuids();
 
     if (!uuids.length) {
-        console.log("[fetchFaces] No new faces.");
+        console.log("[fetchFaces] No faces from camera.");
         return { saved: 0, skipped: 0, unmatched: 0 };
     }
 
-    const faces = await getFacesById(uuids);
-    const statistics = await getLatestStatistics();
+    const missing = uuids.filter((uuid) => !liveFaces.has(uuid));
+    const fetched = missing.length ? await getFacesById(missing) : [];
+    const fetchedById = new Map(
+        fetched.map((face) => [face.UUId, face])
+    );
+    const statistics = missing.length ? await getLatestStatistics() : [];
     const usedStats = new Set();
+    const nextGallery = [];
     let saved = 0;
     let skipped = 0;
     let unmatched = 0;
 
-    for (const face of faces) {
+    for (const uuid of uuids) {
+        const cached = liveFaces.get(uuid);
+
+        if (cached) {
+            nextGallery.push(cached);
+            skipped += 1;
+            continue;
+        }
+
+        const face = fetchedById.get(uuid);
+
+        if (!face) {
+            unmatched += 1;
+            continue;
+        }
+
         const stat = matchStatistic(face, statistics, usedStats);
 
         if (!stat) {
@@ -575,16 +534,27 @@ async function fetchLatestFaces() {
             `Match ${face.UUId}: Group ${groupId} (${groupName}) Time=${time}`
         );
 
-        if (saveFaceImage(face, groupName, time)) {
-            saved += 1;
+        const jpeg = decodeFaceJpeg(face);
+
+        if (!jpeg) {
+            unmatched += 1;
+            continue;
         }
-        else {
-            skipped += 1;
-        }
+
+        nextGallery.push({
+            uuid,
+            group: groupName,
+            time,
+            jpeg,
+            fetchedAt: Date.now()
+        });
+        saved += 1;
     }
 
+    setLiveGallery(nextGallery);
+
     console.log(
-        `[fetchFaces] added ${saved}, skipped ${skipped}, unmatched ${unmatched}`
+        `[fetchFaces] live ${nextGallery.length} (new ${saved}, cached ${skipped}, unmatched ${unmatched})`
     );
 
     return { saved, skipped, unmatched };
@@ -642,7 +612,9 @@ function stopFetchFacesLoop() {
 module.exports = {
     fetchLatestFaces,
     startFetchFacesLoop,
-    stopFetchFacesLoop
+    stopFetchFacesLoop,
+    listLiveFaces,
+    getLiveFaceJpeg
 };
 
 if (require.main === module) {
